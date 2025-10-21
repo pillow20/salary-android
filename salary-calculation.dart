@@ -811,4 +811,5 @@ class _FooterWidget extends StatelessWidget {
       ),
     );
   }
+
 }
