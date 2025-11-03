@@ -458,6 +458,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             return _buildDayCell(day, focusedDay, isToday: true);
           },
           selectedBuilder: (context, day, focusedDay) {
+            // isToday здесь не передается, поэтому логика переносится в _buildDayCell
             return _buildDayCell(day, focusedDay, isSelected: true);
           },
         ),
@@ -505,13 +506,19 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     );
   }
 
-  // ОБНОВЛЕННЫЙ МЕТОД: Обрабатывает новые типы смен и добавляет галочку для Today
+  // ОБНОВЛЕННЫЙ МЕТОД: Обрабатывает новые типы смен, добавляет галочку для Today, 
+  // и гарантирует, что стиль Today всегда приоритетен, даже при выборе.
   Widget _buildDayCell(DateTime day, DateTime focusedDay,
       {bool isToday = false, bool isSelected = false}) {
     final normalizedDay = DateTime(day.year, day.month, day.day);
     final isShiftDay = _allShifts.containsKey(normalizedDay);
     final shift = isShiftDay ? _allShifts[normalizedDay] : null;
     final isDisabled = _disabledDates.containsKey(normalizedDay);
+
+    // ИСПРАВЛЕНИЕ: Определяем фактический сегодняшний день.
+    final now = DateTime.now();
+    final normalizedNow = DateTime(now.year, now.month, now.day);
+    final isActualToday = normalizedDay == normalizedNow;
 
     Color textColor = const Color(0xFF2c3e50);
     String label = '';
@@ -606,7 +613,9 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         );
     }
 
-    if (isToday) {
+    // ВАЖНОЕ ИСПРАВЛЕНИЕ: Этот блок теперь использует isActualToday и должен быть последним
+    // для обеспечения приоритета стиля "Сегодня" (градиент и белый текст), даже если день выбран.
+    if (isActualToday) {
       decoration = BoxDecoration(
         gradient: const LinearGradient(
           colors: [Color(0xFF667eea), Color(0xFF764ba2)],
@@ -641,7 +650,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                 ),
               ),
               // Добавляем галочку, если это текущий день
-              if (isToday)
+              if (isActualToday) // ИСПОЛЬЗУЕМ isActualToday ДЛЯ НАДЕЖНОСТИ
                 Padding(
                   padding: const EdgeInsets.only(left: 4.0),
                   child: Icon(
