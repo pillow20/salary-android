@@ -505,7 +505,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     );
   }
 
-  // ОБНОВЛЕННЫЙ МЕТОД: Обрабатывает новые типы смен
+  // ОБНОВЛЕННЫЙ МЕТОД: Обрабатывает новые типы смен и добавляет галочку для Today
   Widget _buildDayCell(DateTime day, DateTime focusedDay,
       {bool isToday = false, bool isSelected = false}) {
     final normalizedDay = DateTime(day.year, day.month, day.day);
@@ -629,13 +629,28 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Text(
-            day.day.toString(),
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-              color: textColor,
-            ),
+          Row( // Используем Row для размещения номера дня и галочки
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                day.day.toString(),
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: textColor,
+                ),
+              ),
+              // Добавляем галочку, если это текущий день
+              if (isToday)
+                Padding(
+                  padding: const EdgeInsets.only(left: 4.0),
+                  child: Icon(
+                    Icons.check_circle,
+                    size: 14,
+                    color: Colors.white, // Белый для контраста на градиенте
+                  ),
+                ),
+            ],
           ),
           if (label.isNotEmpty && !isDisabled)
             Text(
