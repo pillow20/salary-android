@@ -654,12 +654,12 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             ],
           ),
           if (label.isNotEmpty && !isDisabled)
-            // Использование более крупного шрифта для меток
+            // ИСПОЛЬЗУЕМ FONTSIZE 9
             Text(
               label,
               textAlign: TextAlign.center,
               style: TextStyle(
-                fontSize: 12,
+                fontSize: 9,
                 fontWeight: FontWeight.bold,
                 color: textColor.withOpacity(0.9),
               ),
@@ -668,7 +668,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             const Text(
               'X',
               style: TextStyle(
-                fontSize: 12,
+                fontSize: 9,
                 fontWeight: FontWeight.bold,
                 color: Colors.red,
               ),
