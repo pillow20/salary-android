@@ -1,23 +1,25 @@
-import 'package.flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'package:intl/intl.dart';
-// 1. Добавлен импорт для инициализации локали
-import 'package.intl/date_symbol_data_local.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // === 1. ENUMS И МОДЕЛИ ДАННЫХ ===
 
+// ТИПЫ СМЕН: 2 дневных, 2 ночных + 1 производная
 enum ShiftType {
   none,
-  green, // 'день'
-  brown, // 'ночь'
-  afterBrown, // 'с ночи' (7-часовой выход после ночи)
+  green1, // 'день 1'
+  green2, // 'день 2'
+  brown1, // 'ночь 1'
+  brown2, // 'ночь 2'
+  afterBrown, // 'с ночи' (отсыпной)
 }
 
 class ShiftData {
   final DateTime date;
   final ShiftType type;
-  bool isDisabled; // Эквивалент disabledDates в JS
+  bool isDisabled;
   double hours;
   double nightHours;
   String label;
@@ -31,7 +33,6 @@ class ShiftData {
     this.label = '',
   });
 
-  // Для локального сохранения состояния отключенных смен
   String get dateKey => DateFormat('yyyy-MM-dd').format(date);
 }
 
@@ -44,16 +45,10 @@ const double NDFL_RATE = 0.13;
 
 // === 3. ОСНОВНОЙ WIDGET ПРИЛОЖЕНИЯ ===
 
-// 2. Функция main стала асинхронной
 Future<void> main() async {
-  // 3. Гарантируем, что Flutter инициализирован
   WidgetsFlutterBinding.ensureInitialized();
-
-  // Устанавливаем русский язык по умолчанию
   Intl.defaultLocale = 'ru_RU';
-  // 4. Инициализируем данные локализации
   await initializeDateFormatting('ru_RU', null);
-
   runApp(const ShiftSchedulerApp());
 }
 
@@ -96,7 +91,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       TextEditingController(text: '40');
   double _totalHours = 0;
   double _nightHours = 0;
-  // 5. Добавлена переменная состояния для кол-ва смен
   int _shiftCount = 0;
   String _salaryResult = '';
 
@@ -109,12 +103,12 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     _loadDisabledDates();
   }
 
-  // === 4. ЛОГИКА СМЕН (ПЕРЕНОС JS) ===
+  // === 4. ЛОГИКА ГЕНЕРАЦИИ СМЕН (КОРРЕКТНЫЙ ЦИКЛ 8 ДНЕЙ) ===
 
   void _generateShifts() {
     final Map<DateTime, ShiftData> shifts = {};
-    final DateTime greenStart = DateTime(2025, 1, 3); // дневная — 3 янв 2025
-    final DateTime brownStart = DateTime(2025, 1, 6); // ночная — 6 янв 2025
+    // День, с которого начинается цикл (Day 1 - Green1). 3 января 2025 года.
+    final DateTime cycleStart = DateTime(2025, 1, 3);
     final DateTime endDate = DateTime(2031, 1, 1);
 
     // Вспомогательная функция для добавления смены
@@ -130,33 +124,74 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       );
     }
 
-    // Генерация дневных смен (11 часов)
-    DateTime currentGreen = greenStart;
-    while (currentGreen.isBefore(endDate)) {
-      addShift(currentGreen, ShiftType.green, label: 'день', hours: 11);
-      currentGreen = currentGreen.add(const Duration(days: 8));
+    int dayIndex = 0;
+    for (DateTime currentDate = cycleStart;
+        currentDate.isBefore(endDate);
+        currentDate = currentDate.add(const Duration(days: 1))) {
+      
+      // Индекс в 8-дневном цикле: 0, 1, 2, 3, 4, 5, 6, 7
+      final int cycleDay = dayIndex % 8;
+
+      ShiftType? currentShiftType;
+      double hours = 0;
+      double nightHours = 0;
+      String label = '';
+      
+      // ИСПРАВЛЕННЫЙ ЦИКЛ: D1, D2, OFF, N1, N2, AfterN, OFF, OFF
+      switch (cycleDay) {
+        case 0: // Day 1
+          currentShiftType = ShiftType.green1;
+          hours = 11;
+          label = 'день 1';
+          break;
+        case 1: // Day 2
+          currentShiftType = ShiftType.green2;
+          hours = 11;
+          label = 'день 2';
+          break;
+        case 2: // Выходной (Off)
+          currentShiftType = ShiftType.none;
+          break;
+        case 3: // Night 1
+          currentShiftType = ShiftType.brown1;
+          hours = 11;
+          nightHours = 7.5;
+          label = 'ночь 1';
+          break;
+        case 4: // Night 2
+          currentShiftType = ShiftType.brown2;
+          hours = 11;
+          nightHours = 7.5;
+          label = 'ночь 2';
+          break;
+        case 5: // After Night 2 (Смена "с ночи" / Отсыпной)
+          currentShiftType = ShiftType.afterBrown;
+          hours = 0; // ИСПРАВЛЕНО: Часы смены "с ночи" не оплачиваются
+          nightHours = 0; // ИСПРАВЛЕНО: Ночные часы смены "с ночи" не оплачиваются
+          label = 'с ночи';
+          break;
+        case 6: // Выходной (Off)
+        case 7: // Выходной (Off)
+        default:
+          currentShiftType = ShiftType.none;
+          break;
+      }
+
+      if (currentShiftType != ShiftType.none) {
+        addShift(currentDate, currentShiftType!,
+            label: label, hours: hours, nightHours: nightHours);
+      }
+      
+      dayIndex++;
     }
-
-    // Генерация ночных смен (11 часов) и смены "с ночи" (7 часов)
-    DateTime currentBrown = brownStart;
-    while (currentBrown.isBefore(endDate)) {
-      // Ночная смена - 11 часов
-      addShift(currentBrown, ShiftType.brown,
-          label: 'ночь', hours: 11, nightHours: 7.5);
-
-      // Смена "с ночи" - 7 часов
-      DateTime afterBrown = currentBrown.add(const Duration(days: 2));
-      addShift(afterBrown, ShiftType.afterBrown,
-          label: 'с ночи', hours: 7, nightHours: 4.5);
-
-      currentBrown = currentBrown.add(const Duration(days: 8));
-    }
-
+    
     // Коррекция ночной смены, если она последняя в месяце (только 4 часа)
     shifts.forEach((date, shift) {
-      if (shift.type == ShiftType.brown) {
+      if (shift.type == ShiftType.brown1 || shift.type == ShiftType.brown2) {
         DateTime nextDay = date.add(const Duration(days: 1));
+        
         if (nextDay.month != date.month) {
+          // Укороченная ночная смена на границе месяца
           shift.hours = 4;
           shift.nightHours = 2;
         }
@@ -167,7 +202,43 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     _updateMonthStats(_focusedDay);
   }
 
-  // === 5. ЛОКАЛЬНОЕ ХРАНЕНИЕ (shared_preferences) ===
+  // === 5. ЛОГИКА СТАТИСТИКИ И РАСЧЕТА ===
+
+  void _updateMonthStats(DateTime month) {
+    int shiftCount = 0;
+    double totalHours = 0;
+    double nightHours = 0;
+
+    DateTime start = DateTime(month.year, month.month, 1);
+    // Получаем последний день текущего месяца
+    DateTime end = DateTime(month.year, month.month + 1, 0);
+
+    for (DateTime date = start;
+        date.isBefore(end.add(const Duration(days: 1)));
+        date = date.add(const Duration(days: 1))) {
+      final normalizedDate = DateTime(date.year, date.month, date.day);
+      if (_allShifts.containsKey(normalizedDate) &&
+          !_disabledDates.containsKey(normalizedDate)) {
+        final shift = _allShifts[normalizedDate]!;
+        
+        // ИСПРАВЛЕНО: Учитываем только D1, D2, N1, N2 в общем количестве смен
+        if (shift.type != ShiftType.afterBrown) {
+          shiftCount++;
+        }
+        
+        totalHours += shift.hours;
+        nightHours += shift.nightHours;
+      }
+    }
+
+    setState(() {
+      _totalHours = totalHours;
+      _nightHours = nightHours;
+      _shiftCount = shiftCount;
+    });
+  }
+  
+  // === 6. ЛОКАЛЬНОЕ ХРАНЕНИЕ (shared_preferences) ===
 
   Future<void> _loadDisabledDates() async {
     final prefs = await SharedPreferences.getInstance();
@@ -189,37 +260,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     await prefs.setStringList('disabledDates', disabledKeys);
   }
 
-  // === 6. ЛОГИКА СТАТИСТИКИ И РАСЧЕТА ===
-
-  void _updateMonthStats(DateTime month) {
-    int shiftCount = 0;
-    double totalHours = 0;
-    double nightHours = 0;
-
-    DateTime start = DateTime(month.year, month.month, 1);
-    DateTime end = DateTime(month.year, month.month + 1, 0);
-
-    for (DateTime date = start;
-        date.isBefore(end.add(const Duration(days: 1)));
-        date = date.add(const Duration(days: 1))) {
-      final normalizedDate = DateTime(date.year, date.month, date.day);
-      if (_allShifts.containsKey(normalizedDate) &&
-          !_disabledDates.containsKey(normalizedDate)) {
-        final shift = _allShifts[normalizedDate]!;
-        // 6. Подсчет смен перенесен сюда
-        shiftCount++;
-        totalHours += shift.hours;
-        nightHours += shift.nightHours;
-      }
-    }
-
-    setState(() {
-      _totalHours = totalHours;
-      _nightHours = nightHours;
-      // 7. Обновляем состояние _shiftCount
-      _shiftCount = shiftCount;
-    });
-  }
+  // === 7. ЛОГИКА РАСЧЕТА ЗАРПЛАТЫ ===
 
   void _calculateSalary() {
     double oklad = double.tryParse(_okladController.text) ?? 0;
@@ -253,13 +294,14 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         2. Премия (${premiumPercent.toStringAsFixed(0)}%): ${formatter.format(premiumPay)}
         3. Доплата за ночь: ${formatter.format(nightPay)}
         4. Доплата за вредность (4%): ${formatter.format(harmAddition)}
+        5. НДФЛ (13%): ${formatter.format(ndfl)}
         ---
         **К ВЫПЛАТЕ:** ${formatter.format(finalSalary)}
       ''';
     });
   }
 
-  // === 7. WIDGETS И UI (ПЕРЕНОС HTML/CSS) ===
+  // === 8. WIDGETS И UI ===
 
   @override
   Widget build(BuildContext context) {
@@ -366,6 +408,8 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         lastDay: DateTime.utc(2030, 12, 31),
         focusedDay: _focusedDay,
         calendarFormat: CalendarFormat.month,
+        // Установка начала недели с понедельника
+        startingDayOfWeek: StartingDayOfWeek.monday,
         headerStyle: HeaderStyle(
           formatButtonVisible: false,
           titleCentered: true,
@@ -461,6 +505,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     );
   }
 
+  // ОБНОВЛЕННЫЙ МЕТОД: Обрабатывает новые типы смен
   Widget _buildDayCell(DateTime day, DateTime focusedDay,
       {bool isToday = false, bool isSelected = false}) {
     final normalizedDay = DateTime(day.year, day.month, day.day);
@@ -468,64 +513,97 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     final shift = isShiftDay ? _allShifts[normalizedDay] : null;
     final isDisabled = _disabledDates.containsKey(normalizedDay);
 
-    Color backgroundColor = Colors.white;
     Color textColor = const Color(0xFF2c3e50);
     String label = '';
     BoxDecoration? decoration;
 
     if (isShiftDay && !isDisabled) {
-      if (shift!.type == ShiftType.green) {
-        backgroundColor = Colors.transparent;
-        textColor = Colors.white;
-        decoration = const BoxDecoration(
-          borderRadius: BorderRadius.all(Radius.circular(8)),
-          gradient: LinearGradient(
-            colors: [Color(0xFF4299e1), Color(0xFF2c5282)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-        );
-        label = 'день';
-      } else if (shift.type == ShiftType.brown) {
-        backgroundColor = Colors.transparent;
-        textColor = Colors.white;
-        decoration = const BoxDecoration(
-          borderRadius: BorderRadius.all(Radius.circular(8)),
-          gradient: LinearGradient(
-            colors: [Color(0xFFa0522d), Color(0xFF5D2E0F)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-        );
-        label = 'ночь';
-      } else if (shift.type == ShiftType.afterBrown) {
-        backgroundColor = const Color(0xFFd2a679);
-        textColor = const Color(0xFF5D2E0F);
-        decoration = BoxDecoration(
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: const Color(0xFFb08a5a)),
-          gradient: const LinearGradient(
-            colors: [Color(0xFFd2a679), Color(0xFFb08a5a)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-        );
-        label = 'с ночи';
+      Color startColor = Colors.transparent;
+      Color endColor = Colors.transparent;
+      
+      switch (shift!.type) {
+        case ShiftType.green1:
+          startColor = const Color(0xFF4299e1); // Более светлый синий
+          endColor = const Color(0xFF2c5282);
+          label = 'день 1';
+          textColor = Colors.white;
+          break;
+        case ShiftType.green2:
+          startColor = const Color(0xFF3498db); // Средний синий
+          endColor = const Color(0xFF2980b9);
+          label = 'день 2';
+          textColor = Colors.white;
+          break;
+        case ShiftType.brown1:
+          startColor = const Color(0xFFa0522d); // Более светлый коричневый
+          endColor = const Color(0xFF5D2E0F);
+          label = 'ночь 1';
+          textColor = Colors.white;
+          break;
+        case ShiftType.brown2:
+          startColor = const Color(0xFF8b4513); // Темно-коричневый
+          endColor = const Color(0xFF5D2E0F);
+          label = 'ночь 2';
+          textColor = Colors.white;
+          break;
+        case ShiftType.afterBrown:
+          startColor = const Color(0xFFd2a679);
+          endColor = const Color(0xFFb08a5a);
+          label = 'с ночи';
+          textColor = const Color(0xFF5D2E0F);
+          break;
+        default:
+          break;
       }
+      
+      // Назначаем градиент для всех смен, кроме выходных и пропущенных
+      decoration = BoxDecoration(
+        borderRadius: BorderRadius.circular(8),
+        gradient: LinearGradient(
+          colors: [startColor, endColor],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+      );
+
+      if (shift.type == ShiftType.afterBrown) {
+          // Специальный стиль для "с ночи" (отсыпной)
+          decoration = BoxDecoration(
+            color: startColor,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFF5D2E0F), width: 2),
+            gradient: const LinearGradient(
+              colors: [Color(0xFFf0d9c4), Color(0xFFe9d0bb)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          );
+          textColor = const Color(0xFF5D2E0F);
+      }
+
     } else if (isShiftDay && isDisabled) {
       // Стиль для пропущенной смены (бледный)
       textColor = Colors.grey;
-      backgroundColor = Colors.grey.withOpacity(0.2);
-      label = shift?.label ?? '';
-    } else if (day.weekday == DateTime.saturday ||
-        day.weekday == DateTime.sunday) {
-      // Выходные
-      textColor = const Color(0xFFe74c3c);
-      backgroundColor = const Color(0xFFfdf2f2);
       decoration = BoxDecoration(
+        color: Colors.grey.withOpacity(0.2),
+        borderRadius: BorderRadius.circular(8),
+      );
+      label = shift?.label ?? '';
+    } else if (day.month == focusedDay.month && (day.weekday == DateTime.saturday ||
+        day.weekday == DateTime.sunday)) {
+      // Выходные (если это не сменный день)
+      textColor = const Color(0xFFe74c3c);
+      decoration = BoxDecoration(
+        color: const Color(0xFFfdf2f2),
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: const Color(0xFFfadbd8), width: 1),
       );
+    } else {
+        // Обычные дни без смены (Off Days)
+        decoration = BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(8),
+        );
     }
 
     if (isToday) {
@@ -587,7 +665,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         ? _nightHours.toFixed(0)
         : _nightHours.toFixed(1);
 
-    // 8. Цикл подсчета смен удален, используется переменная состояния _shiftCount
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -595,7 +672,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         borderRadius: BorderRadius.circular(10),
       ),
       child: Text(
-        // 9. Используем _shiftCount
         'Смен: $_shiftCount | Часов: ${_totalHours.toFixed(1)} | Ночных: $formattedNight',
         textAlign: TextAlign.center,
         style: const TextStyle(
@@ -611,7 +687,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     return const Padding(
       padding: EdgeInsets.symmetric(vertical: 20),
       child: Text(
-        'Если вас не было на какой-то смене — нажмите на неё, и она исчезнет из расчётов.',
+        'Если вас не было на какой-то смене — нажмите на неё, и она исчезнет из расчётов. В оплату включены только 11-часовые смены (День 1, День 2, Ночь 1, Ночь 2).',
         textAlign: TextAlign.center,
         style: TextStyle(
           color: Color(0xFF2c3e50),
@@ -634,7 +710,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             color: Colors.black12,
             offset: Offset(0, 1),
             blurRadius: 3,
-            // (Комментарий про 'inset' удален для чистоты)
           ),
         ],
       ),
