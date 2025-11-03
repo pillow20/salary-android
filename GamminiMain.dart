@@ -142,12 +142,12 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         case 0: // Day 1
           currentShiftType = ShiftType.green1;
           hours = 11;
-          label = 'день 1';
+          label = 'день'; // Убрана цифра '1'
           break;
         case 1: // Day 2
           currentShiftType = ShiftType.green2;
           hours = 11;
-          label = 'день 2';
+          label = 'день'; // Убрана цифра '2'
           break;
         case 2: // Выходной (Off)
           currentShiftType = ShiftType.none;
@@ -156,18 +156,18 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
           currentShiftType = ShiftType.brown1;
           hours = 11;
           nightHours = 7.5;
-          label = 'ночь 1';
+          label = 'ночь'; // Убрана цифра '1'
           break;
         case 4: // Night 2
           currentShiftType = ShiftType.brown2;
           hours = 11;
           nightHours = 7.5;
-          label = 'ночь 2';
+          label = 'ночь'; // Убрана цифра '2'
           break;
         case 5: // After Night 2 (Смена "с ночи" / Отсыпной)
           currentShiftType = ShiftType.afterBrown;
-          hours = 0; // ИСПРАВЛЕНО: Часы смены "с ночи" не оплачиваются
-          nightHours = 0; // ИСПРАВЛЕНО: Ночные часы смены "с ночи" не оплачиваются
+          hours = 0; 
+          nightHours = 0; 
           label = 'с ночи';
           break;
         case 6: // Выходной (Off)
@@ -221,7 +221,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
           !_disabledDates.containsKey(normalizedDate)) {
         final shift = _allShifts[normalizedDate]!;
         
-        // ИСПРАВЛЕНО: Учитываем только D1, D2, N1, N2 в общем количестве смен
+        // Учитываем только D1, D2, N1, N2 в общем количестве смен
         if (shift.type != ShiftType.afterBrown) {
           shiftCount++;
         }
@@ -408,6 +408,8 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         lastDay: DateTime.utc(2030, 12, 31),
         focusedDay: _focusedDay,
         calendarFormat: CalendarFormat.month,
+        // Увеличенная высота ячеек для лучшей читаемости меток
+        rowHeight: 90.0, 
         // Установка начала недели с понедельника
         startingDayOfWeek: StartingDayOfWeek.monday,
         headerStyle: HeaderStyle(
@@ -455,10 +457,9 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             return _buildDayCell(day, focusedDay);
           },
           todayBuilder: (context, day, focusedDay) {
-            return _buildDayCell(day, focusedDay, isToday: true);
+            return _buildDayCell(day, focusedDay); // Логика isToday перенесена внутрь _buildDayCell
           },
           selectedBuilder: (context, day, focusedDay) {
-            // isToday здесь не передается, поэтому логика переносится в _buildDayCell
             return _buildDayCell(day, focusedDay, isSelected: true);
           },
         ),
@@ -506,77 +507,44 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     );
   }
 
-  // ОБНОВЛЕННЫЙ МЕТОД: Обрабатывает новые типы смен, добавляет галочку для Today, 
-  // и гарантирует, что стиль Today всегда приоритетен, даже при выборе.
+  // ОБНОВЛЕННЫЙ МЕТОД: Использует сокращенные метки и гарантирует приоритет стиля "Сегодня"
   Widget _buildDayCell(DateTime day, DateTime focusedDay,
-      {bool isToday = false, bool isSelected = false}) {
+      {bool isSelected = false}) {
     final normalizedDay = DateTime(day.year, day.month, day.day);
     final isShiftDay = _allShifts.containsKey(normalizedDay);
     final shift = isShiftDay ? _allShifts[normalizedDay] : null;
     final isDisabled = _disabledDates.containsKey(normalizedDay);
-
-    // ИСПРАВЛЕНИЕ: Определяем фактический сегодняшний день.
+    
+    // Определяем фактический сегодняшний день для галочки и выделения
     final now = DateTime.now();
     final normalizedNow = DateTime(now.year, now.month, now.day);
     final isActualToday = normalizedDay == normalizedNow;
 
     Color textColor = const Color(0xFF2c3e50);
-    String label = '';
+    String label = shift?.label ?? ''; // Берем метку, установленную в _generateShifts
     BoxDecoration? decoration;
 
     if (isShiftDay && !isDisabled) {
       Color startColor = Colors.transparent;
       Color endColor = Colors.transparent;
       
+      // Назначение цветов в зависимости от типа смены
       switch (shift!.type) {
         case ShiftType.green1:
-          startColor = const Color(0xFF4299e1); // Более светлый синий
-          endColor = const Color(0xFF2c5282);
-          label = 'день 1';
-          textColor = Colors.white;
-          break;
         case ShiftType.green2:
-          startColor = const Color(0xFF3498db); // Средний синий
-          endColor = const Color(0xFF2980b9);
-          label = 'день 2';
+          startColor = const Color(0xFF4299e1); 
+          endColor = const Color(0xFF2c5282);
           textColor = Colors.white;
           break;
         case ShiftType.brown1:
-          startColor = const Color(0xFFa0522d); // Более светлый коричневый
-          endColor = const Color(0xFF5D2E0F);
-          label = 'ночь 1';
-          textColor = Colors.white;
-          break;
         case ShiftType.brown2:
-          startColor = const Color(0xFF8b4513); // Темно-коричневый
+          startColor = const Color(0xFFa0522d); 
           endColor = const Color(0xFF5D2E0F);
-          label = 'ночь 2';
           textColor = Colors.white;
           break;
         case ShiftType.afterBrown:
-          startColor = const Color(0xFFd2a679);
-          endColor = const Color(0xFFb08a5a);
-          label = 'с ночи';
-          textColor = const Color(0xFF5D2E0F);
-          break;
-        default:
-          break;
-      }
-      
-      // Назначаем градиент для всех смен, кроме выходных и пропущенных
-      decoration = BoxDecoration(
-        borderRadius: BorderRadius.circular(8),
-        gradient: LinearGradient(
-          colors: [startColor, endColor],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-      );
-
-      if (shift.type == ShiftType.afterBrown) {
-          // Специальный стиль для "с ночи" (отсыпной)
+          // Стиль для "с ночи" (отсыпной)
           decoration = BoxDecoration(
-            color: startColor,
             borderRadius: BorderRadius.circular(8),
             border: Border.all(color: const Color(0xFF5D2E0F), width: 2),
             gradient: const LinearGradient(
@@ -586,6 +554,21 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             ),
           );
           textColor = const Color(0xFF5D2E0F);
+          break;
+        default:
+          break;
+      }
+      
+      // Градиент для рабочих смен (кроме "с ночи", который уже назначен)
+      if (decoration == null) {
+        decoration = BoxDecoration(
+          borderRadius: BorderRadius.circular(8),
+          gradient: LinearGradient(
+            colors: [startColor, endColor],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        );
       }
 
     } else if (isShiftDay && isDisabled) {
@@ -595,7 +578,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         color: Colors.grey.withOpacity(0.2),
         borderRadius: BorderRadius.circular(8),
       );
-      label = shift?.label ?? '';
     } else if (day.month == focusedDay.month && (day.weekday == DateTime.saturday ||
         day.weekday == DateTime.sunday)) {
       // Выходные (если это не сменный день)
@@ -613,8 +595,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         );
     }
 
-    // ВАЖНОЕ ИСПРАВЛЕНИЕ: Этот блок теперь использует isActualToday и должен быть последним
-    // для обеспечения приоритета стиля "Сегодня" (градиент и белый текст), даже если день выбран.
+    // Приоритетный стиль для текущего дня
     if (isActualToday) {
       decoration = BoxDecoration(
         gradient: const LinearGradient(
@@ -623,8 +604,19 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
           end: Alignment.bottomRight,
         ),
         borderRadius: BorderRadius.circular(8),
+        // Если день выбран, добавляем легкое выделение
+        border: isSelected ? Border.all(color: Colors.yellow, width: 3) : null,
       );
       textColor = Colors.white;
+    }
+
+    // Стиль для выбранного дня
+    else if (isSelected) {
+       decoration = BoxDecoration(
+          color: Colors.blue.withOpacity(0.5),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.blue, width: 2),
+      );
     }
 
     if (day.month != focusedDay.month) {
@@ -650,31 +642,33 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                 ),
               ),
               // Добавляем галочку, если это текущий день
-              if (isActualToday) // ИСПОЛЬЗУЕМ isActualToday ДЛЯ НАДЕЖНОСТИ
+              if (isActualToday) 
                 Padding(
                   padding: const EdgeInsets.only(left: 4.0),
                   child: Icon(
                     Icons.check_circle,
                     size: 14,
-                    color: Colors.white, // Белый для контраста на градиенте
+                    color: Colors.white, 
                   ),
                 ),
             ],
           ),
           if (label.isNotEmpty && !isDisabled)
+            // Использование более крупного шрифта для меток
             Text(
               label,
+              textAlign: TextAlign.center,
               style: TextStyle(
-                fontSize: 10,
+                fontSize: 12,
                 fontWeight: FontWeight.bold,
-                color: textColor.withOpacity(0.8),
+                color: textColor.withOpacity(0.9),
               ),
             ),
           if (isDisabled)
             const Text(
               'X',
               style: TextStyle(
-                fontSize: 10,
+                fontSize: 12,
                 fontWeight: FontWeight.bold,
                 color: Colors.red,
               ),
@@ -711,7 +705,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     return const Padding(
       padding: EdgeInsets.symmetric(vertical: 20),
       child: Text(
-        'Если вас не было на какой-то смене — нажмите на неё, и она исчезнет из расчётов. В оплату включены только 11-часовые смены (День 1, День 2, Ночь 1, Ночь 2).',
+        'Если вас не было на какой-то смене — нажмите на неё, и она исчезнет из расчётов. В оплату включены только 11-часовые смены (День, Ночь).',
         textAlign: TextAlign.center,
         style: TextStyle(
           color: Color(0xFF2c3e50),
