@@ -409,7 +409,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         focusedDay: _focusedDay,
         calendarFormat: CalendarFormat.month,
         // Увеличенная высота ячеек для лучшей читаемости меток
-        rowHeight: 90.0, 
+        rowHeight: 70.0, 
         // Установка начала недели с понедельника
         startingDayOfWeek: StartingDayOfWeek.monday,
         headerStyle: HeaderStyle(
