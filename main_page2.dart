@@ -1,111 +1,71 @@
 import 'package:flutter/material.dart';
+import 'package:table_calendar/table_calendar.dart';
 import 'package:intl/intl.dart';
 import 'package:intl/date_symbol_data_local.dart';
-import 'dart:async';
+import 'package:shared_preferences/shared_preferences.dart';
 
-// --- DATA MODEL ---
-enum ShiftType { day, night }
+// === 1. ENUMS И МОДЕЛИ ДАННЫХ ===
 
-class ShiftScheduleData {
-  int _currentYear;
-  int _currentMonth;
-
-  static final DateTime _dayStart = DateTime(2025, 1, 3);
-  static final DateTime _nightStart = DateTime(2025, 1, 6);
-
-  ShiftScheduleData()
-      : _currentYear = DateTime.now().year,
-        _currentMonth = DateTime.now().month - 1;
-
-  int get currentYear => _currentYear;
-  int get currentMonth => _currentMonth;
-
-  String get selectedMonthDisplay {
-    final date = DateTime(_currentYear, _currentMonth + 1);
-    return DateFormat.yMMMM('ru').format(date);
-  }
-
-  int get daysInMonth {
-    return DateTime(_currentYear, _currentMonth + 2, 0).day;
-  }
-
-  int get startDayOfWeek {
-    final firstDay = DateTime(_currentYear, _currentMonth + 1, 1);
-    return firstDay.weekday;
-  }
-
-  ShiftType? getShiftType(int day) {
-    final date = DateTime(_currentYear, _currentMonth + 1, day);
-    return _calculateShift(date);
-  }
-
-  bool isToday(int day) {
-    final now = DateTime.now();
-    return day == now.day &&
-        _currentMonth == now.month - 1 &&
-        _currentYear == now.year;
-  }
-
-  void goToPreviousMonth() {
-    _currentMonth--;
-    if (_currentMonth < 0) {
-      _currentMonth = 11;
-      _currentYear--;
-    }
-  }
-
-  void goToNextMonth() {
-    _currentMonth++;
-    if (_currentMonth > 11) {
-      _currentMonth = 0;
-      _currentYear++;
-    }
-  }
-
-  // --- SHIFT CALCULATION ---
-  ShiftType? _calculateShift(DateTime date) {
-    ShiftType? checkShift(DateTime startDate, ShiftType type) {
-      final Duration diff = date.difference(startDate);
-      final int offset = diff.inDays;
-      final int cycleDay = (offset % 8 + 8) % 8;
-
-      if (cycleDay == 0 || cycleDay == 1) {
-        return type;
-      }
-      return null;
-    }
-
-    final dayShift = checkShift(_dayStart, ShiftType.day);
-    if (dayShift != null) return dayShift;
-
-    final nightShift = checkShift(_nightStart, ShiftType.night);
-    if (nightShift != null) return nightShift;
-
-    return null;
-  }
+// ТИПЫ СМЕН: 2 дневных, 2 ночных + 1 производная
+enum ShiftType {
+  none,
+  green1, // 'день 1'
+  green2, // 'день 2'
+  brown1, // 'ночь 1'
+  brown2, // 'ночь 2'
+  afterBrown, // 'с ночи' (отсыпной)
 }
 
-// --- UI ---
-void main() async {
-  await initializeDateFormatting('ru', null);
+class ShiftData {
+  final DateTime date;
+  final ShiftType type;
+  bool isDisabled;
+  double hours;
+  double nightHours;
+  String label;
+
+  ShiftData({
+    required this.date,
+    required this.type,
+    this.isDisabled = false,
+    this.hours = 0,
+    this.nightHours = 0,
+    this.label = '',
+  });
+
+  String get dateKey => DateFormat('yyyy-MM-dd').format(date);
+}
+
+// === 2. КОНСТАНТЫ РАСЧЕТА ЗАРПЛАТЫ ===
+
+const double BASE_HOURS = 164.3333; // Средняя норма часов
+const double NIGHT_RATE = 0.4;
+const double HARM_RATE = 0.04;
+const double NDFL_RATE = 0.13;
+
+// === 3. ОСНОВНОЙ WIDGET ПРИЛОЖЕНИЯ ===
+
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  runApp(const MyApp());
+  Intl.defaultLocale = 'ru_RU';
+  await initializeDateFormatting('ru_RU', null);
+  runApp(const ShiftSchedulerApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class ShiftSchedulerApp extends StatelessWidget {
+  const ShiftSchedulerApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'График смен бригады № 2',
+      title: 'График смен',
       theme: ThemeData(
         primarySwatch: Colors.blue,
+        visualDensity: VisualDensity.adaptivePlatformDensity,
         fontFamily: 'Arial',
       ),
       home: const ScheduleScreen(),
+      debugShowCheckedModeBanner: false,
     );
   }
 }
@@ -118,408 +78,863 @@ class ScheduleScreen extends StatefulWidget {
 }
 
 class _ScheduleScreenState extends State<ScheduleScreen> {
-  late ShiftScheduleData _scheduleData;
+  // Переменные состояния
+  late DateTime _focusedDay;
+  late DateTime _selectedDay;
+  Map<DateTime, ShiftData> _allShifts = {};
+  Map<DateTime, bool> _disabledDates = {}; // Состояние отсутствия на смене
+
+  // Поля калькулятора
+  final TextEditingController _okladController =
+      TextEditingController(text: '48910');
+  final TextEditingController _premiumController =
+      TextEditingController(text: '40');
+  double _totalHours = 0;
+  double _nightHours = 0;
+  int _shiftCount = 0;
+  String _salaryResult = '';
 
   @override
   void initState() {
     super.initState();
-    _scheduleData = ShiftScheduleData();
+    _focusedDay = DateTime.now();
+    _selectedDay = _focusedDay;
+    _generateShifts();
+    _loadDisabledDates();
   }
 
-  void _onPreviousMonthPressed() {
+  // === 4. ЛОГИКА ГЕНЕРАЦИИ СМЕН (КОРРЕКТНЫЙ ЦИКЛ 8 ДНЕЙ) ===
+
+  void _generateShifts() {
+    final Map<DateTime, ShiftData> shifts = {};
+    // День, с которого начинается цикл (Day 1 - Green1). 3 января 2025 года.
+    final DateTime cycleStart = DateTime(2025, 1, 3);
+    final DateTime endDate = DateTime(2031, 1, 1);
+
+    // Вспомогательная функция для добавления смены
+    void addShift(DateTime date, ShiftType type,
+        {String label = '', double hours = 0, double nightHours = 0}) {
+      final normalizedDate = DateTime(date.year, date.month, date.day);
+      shifts[normalizedDate] = ShiftData(
+        date: normalizedDate,
+        type: type,
+        label: label,
+        hours: hours,
+        nightHours: nightHours,
+      );
+    }
+
+    int dayIndex = 0;
+    for (DateTime currentDate = cycleStart;
+        currentDate.isBefore(endDate);
+        currentDate = currentDate.add(const Duration(days: 1))) {
+      
+      // Индекс в 8-дневном цикле: 0, 1, 2, 3, 4, 5, 6, 7
+      final int cycleDay = dayIndex % 8;
+
+      ShiftType? currentShiftType;
+      double hours = 0;
+      double nightHours = 0;
+      String label = '';
+      
+      // ИСПРАВЛЕННЫЙ ЦИКЛ: D1, D2, OFF, N1, N2, AfterN, OFF, OFF
+      switch (cycleDay) {
+        case 0: // Day 1
+          currentShiftType = ShiftType.green1;
+          hours = 11;
+          label = 'день'; // Убрана цифра '1'
+          break;
+        case 1: // Day 2
+          currentShiftType = ShiftType.green2;
+          hours = 11;
+          label = 'день'; // Убрана цифра '2'
+          break;
+        case 2: // Выходной (Off)
+          currentShiftType = ShiftType.none;
+          break;
+        case 3: // Night 1
+          currentShiftType = ShiftType.brown1;
+          hours = 11;
+          nightHours = 7.5;
+          label = 'ночь'; // Убрана цифра '1'
+          break;
+        case 4: // Night 2
+          currentShiftType = ShiftType.brown2;
+          hours = 11;
+          nightHours = 7.5;
+          label = 'ночь'; // Убрана цифра '2'
+          break;
+        case 5: // After Night 2 (Смена "с ночи" / Отсыпной)
+          currentShiftType = ShiftType.afterBrown;
+          hours = 0; 
+          nightHours = 0; 
+          label = 'с ночи';
+          break;
+        case 6: // Выходной (Off)
+        case 7: // Выходной (Off)
+        default:
+          currentShiftType = ShiftType.none;
+          break;
+      }
+
+      if (currentShiftType != ShiftType.none) {
+        addShift(currentDate, currentShiftType!,
+            label: label, hours: hours, nightHours: nightHours);
+      }
+      
+      dayIndex++;
+    }
+    
+    // Коррекция ночной смены, если она последняя в месяце (только 4 часа)
+    shifts.forEach((date, shift) {
+      if (shift.type == ShiftType.brown1 || shift.type == ShiftType.brown2) {
+        DateTime nextDay = date.add(const Duration(days: 1));
+        
+        if (nextDay.month != date.month) {
+          // Укороченная ночная смена на границе месяца
+          shift.hours = 4;
+          shift.nightHours = 2;
+        }
+      }
+    });
+
+    _allShifts = shifts;
+    _updateMonthStats(_focusedDay);
+  }
+
+  // === 5. ЛОГИКА СТАТИСТИКИ И РАСЧЕТА ===
+
+  void _updateMonthStats(DateTime month) {
+    int shiftCount = 0;
+    double totalHours = 0;
+    double nightHours = 0;
+
+    DateTime start = DateTime(month.year, month.month, 1);
+    // Получаем последний день текущего месяца
+    DateTime end = DateTime(month.year, month.month + 1, 0);
+
+    for (DateTime date = start;
+        date.isBefore(end.add(const Duration(days: 1)));
+        date = date.add(const Duration(days: 1))) {
+      final normalizedDate = DateTime(date.year, date.month, date.day);
+      if (_allShifts.containsKey(normalizedDate) &&
+          !_disabledDates.containsKey(normalizedDate)) {
+        final shift = _allShifts[normalizedDate]!;
+        
+        // Учитываем только D1, D2, N1, N2 в общем количестве смен
+        if (shift.type != ShiftType.afterBrown) {
+          shiftCount++;
+        }
+        
+        totalHours += shift.hours;
+        nightHours += shift.nightHours;
+      }
+    }
+
     setState(() {
-      _scheduleData.goToPreviousMonth();
+      _totalHours = totalHours;
+      _nightHours = nightHours;
+      _shiftCount = shiftCount;
+    });
+  }
+  
+  // === 6. ЛОКАЛЬНОЕ ХРАНЕНИЕ (shared_preferences) ===
+
+  Future<void> _loadDisabledDates() async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<String> disabledKeys = prefs.getStringList('disabledDates') ?? [];
+
+    setState(() {
+      _disabledDates = {
+        for (var key in disabledKeys) DateFormat('yyyy-MM-dd').parse(key): true
+      };
+      _updateMonthStats(_focusedDay);
     });
   }
 
-  void _onNextMonthPressed() {
+  Future<void> _saveDisabledDates() async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<String> disabledKeys = _disabledDates.keys
+        .map((date) => DateFormat('yyyy-MM-dd').format(date))
+        .toList();
+    await prefs.setStringList('disabledDates', disabledKeys);
+  }
+
+  // === 7. ЛОГИКА РАСЧЕТА ЗАРПЛАТЫ ===
+
+  void _calculateSalary() {
+    double oklad = double.tryParse(_okladController.text) ?? 0;
+    double premiumPercent = double.tryParse(_premiumController.text) ?? 0;
+    double hours = _totalHours;
+    double nightHours = _nightHours;
+
+    if (oklad == 0 || hours == 0) {
+      setState(() {
+        _salaryResult = 'Введите оклад и отработайте смены!';
+      });
+      return;
+    }
+
+    double baseRate = oklad / BASE_HOURS;
+    double basePay = baseRate * hours;
+    double premiumPay = basePay * (premiumPercent / 100);
+    double nightPay = baseRate * nightHours * NIGHT_RATE;
+    double totalBeforeHarm = basePay + premiumPay + nightPay;
+    double harmAddition = totalBeforeHarm * HARM_RATE;
+    double totalWithHarm = totalBeforeHarm + harmAddition;
+    double ndfl = totalWithHarm * NDFL_RATE;
+    double finalSalary = totalWithHarm - ndfl;
+
+    final formatter =
+        NumberFormat.currency(locale: 'ru_RU', symbol: 'руб.', decimalDigits: 2);
+
     setState(() {
-      _scheduleData.goToNextMonth();
+      _salaryResult = '''
+        1. Основная оплата: ${formatter.format(basePay)}
+        2. Премия (${premiumPercent.toStringAsFixed(0)}%): ${formatter.format(premiumPay)}
+        3. Доплата за ночь: ${formatter.format(nightPay)}
+        4. Доплата за вредность (4%): ${formatter.format(harmAddition)}
+        5. НДФЛ (13%): ${formatter.format(ndfl)}
+        ---
+        **К ВЫПЛАТЕ:** ${formatter.format(finalSalary)}
+      ''';
     });
   }
+
+  // === 8. WIDGETS И UI ===
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0xFF667EEA), Color(0xFF764BA2)],
-          ),
-        ),
-        child: SafeArea(
-          child: ListView(
-            padding: const EdgeInsets.all(10),
-            children: [
-              Center(
-                child: Container(
-                  constraints: const BoxConstraints(maxWidth: 600),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(15),
-                    boxShadow: const [
-                      BoxShadow(
-                        color: Colors.black12,
-                        offset: Offset(0, 20),
-                        blurRadius: 40,
-                      ),
-                    ],
-                  ),
+      backgroundColor: const Color(0xFF667EEA), // body background
+      body: SingleChildScrollView(
+        child: Center(
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 600),
+            margin: const EdgeInsets.symmetric(vertical: 20, horizontal: 10),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(15),
+              boxShadow: const [
+                BoxShadow(
+                  color: Colors.black12,
+                  blurRadius: 40,
+                  offset: Offset(0, 20),
+                ),
+              ],
+            ),
+            child: Column(
+              children: [
+                _buildHeader(),
+                Padding(
+                  padding: const EdgeInsets.all(20.0),
                   child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      const HeaderSection(),
-                      MainSection(
-                        scheduleData: _scheduleData,
-                        onPreviousMonth: _onPreviousMonthPressed,
-                        onNextMonth: _onNextMonthPressed,
+                      const Text(
+                        'График смен бригады № 2',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFF2c3e50),
+                        ),
                       ),
-                      const FooterSection(),
+                      const SizedBox(height: 20),
+                      _buildCalendar(),
+                      const SizedBox(height: 15),
+                      _buildSummary(),
+                      const SizedBox(height: 25),
+                      _buildInstructionText(),
+                      _buildCalculator(),
                     ],
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
+      bottomNavigationBar: _buildFooter(),
     );
   }
-}
 
-class HeaderSection extends StatelessWidget {
-  const HeaderSection({super.key});
-
-  @override
-  Widget build(BuildContext context) {
+  Widget _buildHeader() {
     return Container(
       decoration: const BoxDecoration(
         gradient: LinearGradient(
-          colors: [Color(0xFF2C3E50), Color(0xFF3498DB)],
+          colors: [Color(0xFF2c3e50), Color(0xFF3498db)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
         ),
-        borderRadius: BorderRadius.vertical(top: Radius.circular(15)),
+        borderRadius: BorderRadius.only(
+          topLeft: Radius.circular(15),
+          topRight: Radius.circular(15),
+        ),
       ),
       padding: const EdgeInsets.symmetric(vertical: 30, horizontal: 20),
-      child: Column(
+      child: const Column(
         children: [
           Text(
             'Муринский хлебокомбинат',
-            style: Theme.of(context)
-                .textTheme
-                .headlineSmall
-                ?.copyWith(color: Colors.white, fontWeight: FontWeight.bold),
+            style: TextStyle(
+              fontSize: 28.8,
+              fontWeight: FontWeight.bold,
+              color: Colors.white,
+            ),
           ),
-          const SizedBox(height: 10),
           Text(
             'бригада номер 2',
-            style: Theme.of(context)
-                .textTheme
-                .titleLarge
-                ?.copyWith(color: Colors.white.withOpacity(0.9)),
+            style: TextStyle(
+              fontSize: 20.8,
+              fontWeight: FontWeight.normal,
+              color: Colors.white70,
+            ),
           ),
         ],
       ),
     );
   }
-}
 
-class MainSection extends StatelessWidget {
-  final ShiftScheduleData scheduleData;
-  final VoidCallback onPreviousMonth;
-  final VoidCallback onNextMonth;
-
-  const MainSection({
-    required this.scheduleData,
-    required this.onPreviousMonth,
-    required this.onNextMonth,
-    super.key,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 30, horizontal: 20),
-      child: Column(
-        children: [
-          const ActionButtons(),
-          const SizedBox(height: 25),
-          const ScheduleTitle(),
-          const SizedBox(height: 25),
-          CalendarHeader(
-            scheduleData: scheduleData,
-            onPreviousMonth: onPreviousMonth,
-            onNextMonth: onNextMonth,
-          ),
-          const SizedBox(height: 20),
-          CalendarGrid(scheduleData: scheduleData),
-        ],
-      ),
-    );
-  }
-}
-
-class ActionButtons extends StatelessWidget {
-  const ActionButtons({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        _buildButton(context, 'Расчет зарплаты', () {}),
-        const SizedBox(height: 16),
-        _buildButton(context, 'Расчет в выходной день', () {}),
-        const SizedBox(height: 16),
-        _buildButton(context, 'Кнопка 3', () {}),
-      ],
-    );
-  }
-
-  Widget _buildButton(BuildContext context, String text, VoidCallback onTap) {
+  Widget _buildCalendar() {
     return Container(
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [Color(0xFF3498DB), Color(0xFF2980B9)],
-        ),
-        borderRadius: BorderRadius.circular(10),
+        color: const Color(0xFFf8f9fa),
+        borderRadius: BorderRadius.circular(12),
       ),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(10),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Text(
-              text,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                  color: Colors.white, fontWeight: FontWeight.bold),
+      child: TableCalendar(
+        locale: 'ru_RU',
+        firstDay: DateTime.utc(2025, 1, 1),
+        lastDay: DateTime.utc(2030, 12, 31),
+        focusedDay: _focusedDay,
+        calendarFormat: CalendarFormat.month,
+        // Увеличенная высота ячеек для лучшей читаемости меток
+        rowHeight: 90.0, 
+        // Установка начала недели с понедельника
+        startingDayOfWeek: StartingDayOfWeek.monday,
+        headerStyle: HeaderStyle(
+          formatButtonVisible: false,
+          titleCentered: true,
+          titleTextStyle: const TextStyle(
+            fontSize: 18.4,
+            fontWeight: FontWeight.bold,
+            color: Color(0xFF2c3e50),
+          ),
+          leftChevronIcon: _buildNavButton(Icons.chevron_left),
+          rightChevronIcon: _buildNavButton(Icons.chevron_right),
+        ),
+        calendarStyle: CalendarStyle(
+          weekendTextStyle: const TextStyle(color: Color(0xFFe74c3c)),
+          defaultDecoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          todayDecoration: BoxDecoration(
+            gradient: const LinearGradient(
+              colors: [Color(0xFF667eea), Color(0xFF764ba2)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
             ),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          todayTextStyle:
+              const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+          selectedDecoration: BoxDecoration(
+            color: Colors.blue.withOpacity(0.5),
+            borderRadius: BorderRadius.circular(8),
           ),
         ),
-      ),
-    );
-  }
-}
-
-class ScheduleTitle extends StatelessWidget {
-  const ScheduleTitle({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.only(bottom: 12),
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: Color(0xFFEEEEEE), width: 2)),
-      ),
-      child: Text(
-        'График смен бригады № 2',
-        style: Theme.of(context)
-            .textTheme
-            .titleLarge
-            ?.copyWith(fontWeight: FontWeight.bold),
-      ),
-    );
-  }
-}
-
-class CalendarHeader extends StatelessWidget {
-  final ShiftScheduleData scheduleData;
-  final VoidCallback onPreviousMonth;
-  final VoidCallback onNextMonth;
-
-  const CalendarHeader({
-    required this.scheduleData,
-    required this.onPreviousMonth,
-    required this.onNextMonth,
-    super.key,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        _navBtn(Icons.arrow_back_ios_rounded, onPreviousMonth),
-        Expanded(
-          child: Container(
-            padding: const EdgeInsets.symmetric(vertical: 10),
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: const Color(0xFFF8F9FA),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Text(
-              scheduleData.selectedMonthDisplay,
-              style: const TextStyle(
-                  fontWeight: FontWeight.bold, color: Color(0xFF2C3E50)),
-            ),
-          ),
+        daysOfWeekHeight: 25,
+        onPageChanged: (focusedDay) {
+          setState(() {
+            _focusedDay = focusedDay;
+            _updateMonthStats(focusedDay);
+          });
+        },
+        // Кастомизация ячеек дня
+        calendarBuilders: CalendarBuilders(
+          defaultBuilder: (context, day, focusedDay) {
+            return _buildDayCell(day, focusedDay);
+          },
+          todayBuilder: (context, day, focusedDay) {
+            return _buildDayCell(day, focusedDay); // Логика isToday перенесена внутрь _buildDayCell
+          },
+          selectedBuilder: (context, day, focusedDay) {
+            return _buildDayCell(day, focusedDay, isSelected: true);
+          },
         ),
-        _navBtn(Icons.arrow_forward_ios_rounded, onNextMonth),
-      ],
+        selectedDayPredicate: (day) {
+          return isSameDay(_selectedDay, day);
+        },
+        onDaySelected: (selectedDay, focusedDay) {
+          final normalizedSelectedDay =
+              DateTime(selectedDay.year, selectedDay.month, selectedDay.day);
+          if (_allShifts.containsKey(normalizedSelectedDay)) {
+            setState(() {
+              if (_disabledDates.containsKey(normalizedSelectedDay)) {
+                _disabledDates.remove(normalizedSelectedDay);
+              } else {
+                _disabledDates[normalizedSelectedDay] = true;
+              }
+              _saveDisabledDates(); // Сохраняем изменение
+              _focusedDay = focusedDay;
+              _selectedDay = selectedDay;
+              _updateMonthStats(focusedDay);
+            });
+          }
+        },
+      ),
     );
   }
 
-  Widget _navBtn(IconData icon, VoidCallback onTap) {
+  Widget _buildNavButton(IconData icon) {
     return Container(
       width: 40,
       height: 40,
-      margin: const EdgeInsets.symmetric(horizontal: 8),
       decoration: BoxDecoration(
         color: Colors.white,
+        border: Border.all(color: const Color(0xFF3498db), width: 2),
         shape: BoxShape.circle,
-        border: Border.all(color: Color(0xFF3498DB), width: 2),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black12,
+            blurRadius: 6,
+            offset: Offset(0, 2),
+          ),
+        ],
       ),
-      child: IconButton(
-        icon: Icon(icon, size: 18),
-        onPressed: onTap,
-        color: const Color(0xFF3498DB),
-      ),
+      child: Icon(icon, color: const Color(0xFF3498db), size: 18),
     );
   }
-}
 
-class CalendarGrid extends StatelessWidget {
-  final ShiftScheduleData scheduleData;
+  // ОБНОВЛЕННЫЙ МЕТОД: Использует сокращенные метки и гарантирует приоритет стиля "Сегодня"
+  Widget _buildDayCell(DateTime day, DateTime focusedDay,
+      {bool isSelected = false}) {
+    final normalizedDay = DateTime(day.year, day.month, day.day);
+    final isShiftDay = _allShifts.containsKey(normalizedDay);
+    final shift = isShiftDay ? _allShifts[normalizedDay] : null;
+    final isDisabled = _disabledDates.containsKey(normalizedDay);
+    
+    // Определяем фактический сегодняшний день для галочки и выделения
+    final now = DateTime.now();
+    final normalizedNow = DateTime(now.year, now.month, now.day);
+    final isActualToday = normalizedDay == normalizedNow;
 
-  const CalendarGrid({required this.scheduleData, super.key});
+    Color textColor = const Color(0xFF2c3e50);
+    String label = shift?.label ?? ''; // Берем метку, установленную в _generateShifts
+    BoxDecoration? decoration;
 
-  final List<String> _names = const ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        GridView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 7,
-            childAspectRatio: 1,
-          ),
-          itemCount: 7,
-          itemBuilder: (_, i) => Center(
-            child: Text(
-              _names[i],
-              style: const TextStyle(
-                  fontWeight: FontWeight.bold, color: Colors.black54),
+    if (isShiftDay && !isDisabled) {
+      Color startColor = Colors.transparent;
+      Color endColor = Colors.transparent;
+      
+      // Назначение цветов в зависимости от типа смены
+      switch (shift!.type) {
+        case ShiftType.green1:
+        case ShiftType.green2:
+          startColor = const Color(0xFF4299e1); 
+          endColor = const Color(0xFF2c5282);
+          textColor = Colors.white;
+          break;
+        case ShiftType.brown1:
+        case ShiftType.brown2:
+          startColor = const Color(0xFFa0522d); 
+          endColor = const Color(0xFF5D2E0F);
+          textColor = Colors.white;
+          break;
+        case ShiftType.afterBrown:
+          // Стиль для "с ночи" (отсыпной)
+          decoration = BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFF5D2E0F), width: 2),
+            gradient: const LinearGradient(
+              colors: [Color(0xFFf0d9c4), Color(0xFFe9d0bb)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
             ),
+          );
+          textColor = const Color(0xFF5D2E0F);
+          break;
+        default:
+          break;
+      }
+      
+      // Градиент для рабочих смен (кроме "с ночи", который уже назначен)
+      if (decoration == null) {
+        decoration = BoxDecoration(
+          borderRadius: BorderRadius.circular(8),
+          gradient: LinearGradient(
+            colors: [startColor, endColor],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
           ),
+        );
+      }
+
+    } else if (isShiftDay && isDisabled) {
+      // Стиль для пропущенной смены (бледный)
+      textColor = Colors.grey;
+      decoration = BoxDecoration(
+        color: Colors.grey.withOpacity(0.2),
+        borderRadius: BorderRadius.circular(8),
+      );
+    } else if (day.month == focusedDay.month && (day.weekday == DateTime.saturday ||
+        day.weekday == DateTime.sunday)) {
+      // Выходные (если это не сменный день)
+      textColor = const Color(0xFFe74c3c);
+      decoration = BoxDecoration(
+        color: const Color(0xFFfdf2f2),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFfadbd8), width: 1),
+      );
+    } else {
+        // Обычные дни без смены (Off Days)
+        decoration = BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(8),
+        );
+    }
+
+    // Приоритетный стиль для текущего дня
+    if (isActualToday) {
+      decoration = BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF667eea), Color(0xFF764ba2)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
         ),
-        const SizedBox(height: 10),
-        GridView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 7,
-            childAspectRatio: 0.85,
-          ),
-          itemCount: scheduleData.startDayOfWeek - 1 + scheduleData.daysInMonth,
-          itemBuilder: (_, index) {
-            if (index < scheduleData.startDayOfWeek - 1) {
-              return const SizedBox.shrink();
-            }
-
-            final day =
-                index - (scheduleData.startDayOfWeek - 1) + 1;
-            final isWeekend = (index % 7 == 5 || index % 7 == 6);
-
-            return DayCell(
-              dayNumber: day,
-              shiftType: scheduleData.getShiftType(day),
-              isWeekend: isWeekend,
-              isToday: scheduleData.isToday(day),
-            );
-          },
-        ),
-      ],
-    );
-  }
-}
-
-class DayCell extends StatelessWidget {
-  final int dayNumber;
-  final ShiftType? shiftType;
-  final bool isWeekend;
-  final bool isToday;
-
-  const DayCell({
-    super.key,
-    required this.dayNumber,
-    required this.shiftType,
-    required this.isWeekend,
-    required this.isToday,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    Color textColor = const Color(0xFF2C3E50);
-    Gradient? gradient;
-    String? label;
-
-    if (isToday) {
-      gradient = const LinearGradient(
-        colors: [Color(0xFF667EEA), Color(0xFF764BA2)],
+        borderRadius: BorderRadius.circular(8),
+        // Если день выбран, добавляем легкое выделение
+        border: isSelected ? Border.all(color: Colors.yellow, width: 3) : null,
       );
       textColor = Colors.white;
-    } else if (shiftType == ShiftType.day) {
-      gradient = const LinearGradient(
-        colors: [Color(0xFF4299E1), Color(0xFF2C5282)],
+    }
+
+    // Стиль для выбранного дня
+    else if (isSelected) {
+       decoration = BoxDecoration(
+          color: Colors.blue.withOpacity(0.5),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.blue, width: 2),
       );
-      textColor = Colors.white;
-      label = 'день';
-    } else if (shiftType == ShiftType.night) {
-      gradient = const LinearGradient(
-        colors: [Color(0xFFA0522D), Color(0xFF5D2E0F)],
-      );
-      textColor = Colors.white;
-      label = 'ночь';
+    }
+
+    if (day.month != focusedDay.month) {
+      textColor = textColor.withOpacity(0.5);
     }
 
     return Container(
-      decoration: BoxDecoration(
-        gradient: gradient,
-        color: gradient == null ? Colors.white : null,
-        borderRadius: BorderRadius.circular(8),
-      ),
+      margin: const EdgeInsets.all(3.0),
+      alignment: Alignment.center,
+      decoration: decoration,
       child: Column(
-        mainAxisAlignment: MainAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const SizedBox(height: 4),
-          Text(
-            '$dayNumber',
-            style: TextStyle(
-                fontWeight: FontWeight.bold, fontSize: 12, color: textColor),
+          Row( // Используем Row для размещения номера дня и галочки
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                day.day.toString(),
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: textColor,
+                ),
+              ),
+              // Добавляем галочку, если это текущий день
+              if (isActualToday) 
+                Padding(
+                  padding: const EdgeInsets.only(left: 4.0),
+                  child: Icon(
+                    Icons.check_circle,
+                    size: 14,
+                    color: Colors.white, 
+                  ),
+                ),
+            ],
           ),
-          if (label != null)
+          if (label.isNotEmpty && !isDisabled)
+            // ИСПОЛЬЗУЕМ FONTSIZE 9
             Text(
-              label!,
+              label,
+              textAlign: TextAlign.center,
               style: TextStyle(
-                  fontWeight: FontWeight.bold, fontSize: 10, color: textColor),
+                fontSize: 9,
+                fontWeight: FontWeight.bold,
+                color: textColor.withOpacity(0.9),
+              ),
+            ),
+          if (isDisabled)
+            const Text(
+              'X',
+              style: TextStyle(
+                fontSize: 9,
+                fontWeight: FontWeight.bold,
+                color: Colors.red,
+              ),
             ),
         ],
       ),
     );
   }
-}
 
-class FooterSection extends StatelessWidget {
-  const FooterSection({super.key});
+  Widget _buildSummary() {
+    String formattedNight = _nightHours % 1 == 0
+        ? _nightHours.toFixed(0)
+        : _nightHours.toFixed(1);
 
-  @override
-  Widget build(BuildContext context) {
     return Container(
-      decoration: const BoxDecoration(
-        color: Color(0xFF2C3E50),
-        borderRadius: BorderRadius.vertical(bottom: Radius.circular(15)),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFf1f8ff),
+        borderRadius: BorderRadius.circular(10),
       ),
-      padding: const EdgeInsets.all(20),
       child: Text(
-        '© 2025 "Алексей Агафонов" - Расчет зарплаты',
+        'Смен: $_shiftCount | Часов: ${_totalHours.toFixed(1)} | Ночных: $formattedNight',
         textAlign: TextAlign.center,
-        style: const TextStyle(color: Colors.white70),
+        style: const TextStyle(
+          fontWeight: FontWeight.bold,
+          color: Color(0xFF2c3e50),
+          fontSize: 16,
+        ),
       ),
     );
+  }
+
+  Widget _buildInstructionText() {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 20),
+      child: Text(
+        'Если вас не было на какой-то смене — нажмите на неё, и она исчезнет из расчётов. В оплату включены только 11-часовые смены (День, Ночь).',
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          color: Color(0xFF2c3e50),
+          fontWeight: FontWeight.bold,
+          fontSize: 15.2,
+          height: 1.4,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCalculator() {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: const Color(0xFFf8f9fa),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black12,
+            offset: Offset(0, 1),
+            blurRadius: 3,
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          const Text(
+            'Калькулятор зарплаты',
+            style: TextStyle(
+              fontSize: 20.8,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF2c3e50),
+            ),
+          ),
+          const SizedBox(height: 20),
+          _buildFormGroup('Оклад (руб.):', _okladController),
+          _buildFormGroup(
+              'Отработанные часы:', TextEditingController(text: _totalHours.toFixed(2)),
+              isReadOnly: true),
+          _buildFormGroup(
+              'Ночные часы:', TextEditingController(text: _nightHours.toFixed(2)),
+              isReadOnly: true),
+          _buildFormGroup('Премия за месяц (%):', _premiumController),
+          const SizedBox(height: 15),
+          ElevatedButton(
+            onPressed: _calculateSalary,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.transparent,
+              padding: EdgeInsets.zero,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
+              elevation: 0,
+            ).copyWith(
+              overlayColor: MaterialStateProperty.all(Colors.transparent),
+              padding: MaterialStateProperty.all(const EdgeInsets.all(14)),
+              textStyle: MaterialStateProperty.all(
+                  const TextStyle(fontSize: 17.6, fontWeight: FontWeight.bold)),
+              minimumSize:
+                  MaterialStateProperty.all(const Size.fromHeight(50)),
+              surfaceTintColor: MaterialStateProperty.all(Colors.transparent),
+            ),
+            child: Ink(
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF27ae60), Color(0xFF2ecc71)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Container(
+                alignment: Alignment.center,
+                child: const Text('Рассчитать зарплату',
+                    style: TextStyle(color: Colors.white)),
+              ),
+            ),
+          ),
+          if (_salaryResult.isNotEmpty) _buildResultWidget(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFormGroup(String label, TextEditingController controller,
+      {bool isReadOnly = false}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF34495e),
+            ),
+          ),
+          const SizedBox(height: 6),
+          TextField(
+            controller: controller,
+            keyboardType:
+                isReadOnly ? TextInputType.none : TextInputType.number,
+            readOnly: isReadOnly,
+            decoration: InputDecoration(
+              contentPadding: const EdgeInsets.all(10),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: const BorderSide(color: Color(0xFFced4da)),
+              ),
+              filled: isReadOnly,
+              fillColor: isReadOnly ? Colors.grey[200] : Colors.white,
+            ),
+            onChanged: (value) {
+              // Пересчет статистики при изменении оклада или премии
+              _calculateSalary();
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildResultWidget() {
+    return Container(
+      margin: const EdgeInsets.only(top: 25),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black12,
+            blurRadius: 12,
+            offset: Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildResultItem('Оклад:', _okladController.text, 'руб.'),
+          _buildResultItem('Отработано часов:', _totalHours.toFixed(2), 'ч'),
+          _buildResultItem('Премия:', _premiumController.text, '%'),
+          const Divider(height: 30, thickness: 1, color: Color(0xFFdee2e6)),
+          ..._salaryResult.split('---')[0].trim().split('\n').map((line) {
+            final parts = line.split(':');
+            return _buildResultItem(parts[0].trim(), parts[1].trim(), '');
+          }).toList(),
+          const Divider(height: 30, thickness: 2, color: Color(0xFFeeeeee)),
+          Text(
+            _salaryResult.split('**К ВЫПЛАТЕ:**')[1].trim(),
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 22.4,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF27ae60),
+            ),
+          ),
+          const SizedBox(height: 15),
+          ElevatedButton(
+            onPressed: () {
+              setState(() {
+                _okladController.text = '48910';
+                _premiumController.text = '40';
+                _salaryResult = '';
+              });
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFe0e0e0),
+              foregroundColor: const Color(0xFF333333),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8)),
+            ),
+            child: const Text('Новый расчёт',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildResultItem(String label, String value, String suffix) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF2c3e50),
+            ),
+          ),
+          Text(
+            '$value $suffix',
+            style: TextStyle(
+              color: label.contains('НДФЛ')
+                  ? const Color(0xFFe74c3c)
+                  : const Color(0xFF3498db),
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFooter() {
+    return Container(
+      color: const Color(0xFF2c3e50),
+      padding: const EdgeInsets.symmetric(vertical: 20),
+      child: const Text(
+        '© 2025 "Алексей Агафонов" - Расчет зарплаты',
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: 14.4,
+        ),
+      ),
+    );
+  }
+}
+
+// === Расширения для удобства ===
+
+extension DoubleExtension on double {
+  String toFixed(int fractionDigits) {
+    return toStringAsFixed(fractionDigits);
   }
 }
